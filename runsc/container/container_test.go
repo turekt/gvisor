@@ -48,6 +48,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	config.RegisterFlags(flag.CommandLine)
 	log.SetLevel(log.Debug)
 	if err := testutil.ConfigureExePath(); err != nil {
 		panic(err.Error())

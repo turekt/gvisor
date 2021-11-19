@@ -48,7 +48,7 @@ go_test(
     args = select({
         "//conditions:default": ["-test_platforms=%s" % ",".join(
             [p for (p, tags) in platforms.items() if "manual" not in tags],
-        )],
+        ) or default_platform],
         "//tools:gotsan": ["-test_platforms=%s" % default_platform],
     }),
     data = [

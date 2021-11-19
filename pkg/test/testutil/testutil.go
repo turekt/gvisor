@@ -21,7 +21,6 @@ import (
 	"debug/elf"
 	"encoding/base32"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -45,6 +44,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -174,11 +174,9 @@ func TestConfig(t *testing.T) *config.Config {
 		logDir = dir + "/"
 	}
 
-	// Only register flags if config is being used. Otherwise anyone that uses
-	// testutil will get flags registered and they may conflict.
-	config.RegisterFlags()
-
-	conf, err := config.NewFromFlags()
+	testFlags := flag.NewFlagSet("test", flag.ContinueOnError)
+	config.RegisterFlags(testFlags)
+	conf, err := config.NewFromFlags(testFlags)
 	if err != nil {
 		panic(err)
 	}

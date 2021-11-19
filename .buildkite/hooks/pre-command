@@ -1,3 +1,7 @@
+# Download any build-specific configuration that has been uploaded.
+# This allows top-level steps to override all subsequent steps.
+buildkite-agent artifact download 'tools/bazeldefs/*' . || true
+
 # Install packages we need. Docker must be installed and configured,
 # as should Go itself. We just install some extra bits and pieces.
 function install_pkgs() {
@@ -15,6 +19,8 @@ install_pkgs make linux-libc-dev graphviz jq curl binutils gnupg gnupg-agent \
 # Install headers, only if available.
 if test -n "$(apt-cache search --names-only "^linux-headers-$(uname -r)$")"; then
   install_pkgs "linux-headers-$(uname -r)"
+elif test -n "$(apt-cache search --names-only "^linux-gcp-headers-$(uname -r | cut -d- -f1-2)$")"; then
+  install_pkgs "linux-gcp-headers-$(uname -r | cut -d- -f1-2)"
 fi
 
 # Setup for parallelization with PARTITION and TOTAL_PARTITIONS.

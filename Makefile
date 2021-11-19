@@ -99,6 +99,7 @@ endif
 ##     RUNTIME_BIN     - The runtime binary (default: $RUNTIME_DIR/runsc).
 ##     RUNTIME_LOG_DIR - The logs directory (default: $RUNTIME_DIR/logs).
 ##     RUNTIME_LOGS    - The log pattern (default: $RUNTIME_LOG_DIR/runsc.log.%TEST%.%TIMESTAMP%.%COMMAND%).
+##     RUNTIME_ARGS    - Arguments passed to the runtime when installed.
 ##     STAGED_BINARIES - A tarball of staged binaries. If this is set, then binaries
 ##                       will be installed from this staged bundle instead of built.
 ##
@@ -112,6 +113,7 @@ endif
 RUNTIME_BIN     := $(RUNTIME_DIR)/runsc
 RUNTIME_LOG_DIR := $(RUNTIME_DIR)/logs
 RUNTIME_LOGS    := $(RUNTIME_LOG_DIR)/runsc.log.%TEST%.%TIMESTAMP%.%COMMAND%
+RUNTIME_ARGS    ?=
 
 ifeq ($(shell stat -f -c "%T" /sys/fs/cgroup 2>/dev/null),cgroup2fs)
 CGROUPV2 := true
@@ -133,7 +135,7 @@ endif
 # Configure helpers for below.
 configure_noreload = \
   $(call header,CONFIGURE $(1) → $(RUNTIME_BIN) $(2)); \
-  sudo $(RUNTIME_BIN) install --experimental=true --runtime="$(1)" -- --debug-log "$(RUNTIME_LOGS)" $(2) && \
+  sudo $(RUNTIME_BIN) install --experimental=true --runtime="$(1)" -- $(RUNTIME_ARGS) --debug-log "$(RUNTIME_LOGS)" $(2) && \
   sudo rm -rf "$(RUNTIME_LOG_DIR)" && mkdir -p "$(RUNTIME_LOG_DIR)"
 reload_docker = \
   sudo systemctl reload docker && \
@@ -221,18 +223,8 @@ network-tests: ## Run all networking integration tests.
 network-tests: iptables-tests packetdrill-tests packetimpact-tests
 .PHONY: network-tests
 
-# The set of system call targets.
-SYSCALL_TARGETS := test/syscalls/... test/fuse/...
-
-syscall-%-tests:
-	@$(call test,--test_tag_filters=runsc_$* $(PARTITIONS) test/syscalls/...)
-
-syscall-native-tests:
-	@$(call test,--test_tag_filters=native $(PARTITIONS) test/syscalls/...)
-.PHONY: syscall-native-tests
-
-syscall-tests: ## Run all system call tests.
-	@$(call test,$(PARTITIONS) test/syscalls/...)
+syscall-tests: $(RUNTIME_BIN) ## Run all system call tests.
+	@$(call test,--test_arg=--runsc=$(RUNTIME_BIN) $(PARTITIONS) test/syscalls/... test/fuse/...)
 .PHONY: syscall-tests
 
 packetimpact-tests:
@@ -358,7 +350,6 @@ containerd-tests: containerd-test-1.5.4
 ##     BENCHMARKS_FILTER    - filter to be applied to the test suite.
 ##     BENCHMARKS_OPTIONS   - options to be passed to the test.
 ##     BENCHMARKS_PROFILE   - profile options to be passed to the test.
-##     BENCH_RUNTIME_ARGS   - args to configure the runtime which runs the benchmarks.
 ##
 BENCHMARKS_PROJECT   ?= gvisor-benchmarks
 BENCHMARKS_DATASET   ?= kokoro
@@ -371,8 +362,6 @@ BENCHMARKS_FILTER    := .
 BENCHMARKS_OPTIONS   := -test.benchtime=30s
 BENCHMARKS_ARGS      := -test.v -test.bench=$(BENCHMARKS_FILTER) $(BENCHMARKS_OPTIONS)
 BENCHMARKS_PROFILE   := -pprof-dir=/tmp/profile -pprof-cpu -pprof-heap -pprof-block -pprof-mutex
-BENCH_VFS            := --vfs2
-BENCH_RUNTIME_ARGS   ?=
 
 init-benchmark-table: ## Initializes a BigQuery table with the benchmark schema.
 	@$(call run,//tools/parsers:parser,init --project=$(BENCHMARKS_PROJECT) --dataset=$(BENCHMARKS_DATASET) --table=$(BENCHMARKS_TABLE))
@@ -394,14 +383,13 @@ run_benchmark = \
 benchmark-platforms: load-benchmarks $(RUNTIME_BIN) ## Runs benchmarks for runc and all platforms.
 	@set -xe; for PLATFORM in $$($(RUNTIME_BIN) help platforms); do \
 	  export PLATFORM; \
-	  $(call run_benchmark,$${PLATFORM},--platform=$${PLATFORM} $(BENCH_RUNTIME_ARGS) --vfs2); \
+	  $(call run_benchmark,$${PLATFORM},--platform=$${PLATFORM}); \
 	done
 	@$(call run_benchmark,runc)
 .PHONY: benchmark-platforms
 
 run-benchmark: load-benchmarks $(RUNTIME_BIN) ## Runs single benchmark and optionally sends data to BigQuery.
-	@if test "$(RUNTIME)" = "runc"; then $(call run_benchmark,$(RUNTIME)); fi;
-	@if test "$(RUNTIME)" != "runc"; then $(call run_benchmark,$(RUNTIME)$(BENCH_VFS),$(BENCH_RUNTIME_ARGS) $(BENCH_VFS)); fi;
+	@$(call run_benchmark,$(RUNTIME))
 .PHONY: run-benchmark
 
 ##

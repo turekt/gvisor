@@ -125,9 +125,17 @@ def _syscall_test(
         name = name,
         test = test,
         runner_args = runner_args,
-        tags = tags,
+        # Tests may require accessing device files in order to
+        # run, which are not provided by the sandbox.
+        tags = tags + ["no-sandbox"],
         **kwargs
     )
+
+def all_platforms():
+    """All platforms returns a list of all platforms."""
+    available = dict(platforms.items())
+    available[default_platform] = platforms.get(default_platform, [])
+    return available.items()
 
 def syscall_test(
         test,
@@ -167,7 +175,7 @@ def syscall_test(
             platform = default_platform,
             use_tmpfs = use_tmpfs,
             add_uds_tree = add_uds_tree,
-            tags = tags + platforms[default_platform],
+            tags = tags + platforms.get(default_platform, []),
             debug = debug,
             vfs2 = False,
             **kwargs
@@ -185,7 +193,7 @@ def syscall_test(
             **kwargs
         )
 
-    for (platform, platform_tags) in platforms.items():
+    for platform, platform_tags in all_platforms():
         _syscall_test(
             test = test,
             platform = platform,
@@ -204,7 +212,7 @@ def syscall_test(
             platform = default_platform,
             use_tmpfs = use_tmpfs,
             add_uds_tree = add_uds_tree,
-            tags = platforms[default_platform] + tags,
+            tags = platforms.get(default_platform, []) + tags,
             debug = debug,
             fuse = fuse,
             vfs2 = vfs2,
@@ -218,7 +226,7 @@ def syscall_test(
             use_tmpfs = use_tmpfs,
             network = "host",
             add_uds_tree = add_uds_tree,
-            tags = platforms[default_platform] + tags,
+            tags = platforms.get(default_platform, []) + tags,
             debug = debug,
             fuse = fuse,
             vfs2 = vfs2,
@@ -231,7 +239,7 @@ def syscall_test(
             platform = default_platform,
             use_tmpfs = use_tmpfs,
             add_uds_tree = add_uds_tree,
-            tags = platforms[default_platform] + tags,
+            tags = platforms.get(default_platform, []) + tags,
             debug = debug,
             file_access = "shared",
             fuse = fuse,

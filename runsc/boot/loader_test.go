@@ -35,6 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/fsgofer"
 )
 
@@ -44,11 +45,11 @@ func init() {
 	if err := fsgofer.OpenProcSelfFD(); err != nil {
 		panic(err)
 	}
-	config.RegisterFlags()
 }
 
 func testConfig() *config.Config {
-	conf, err := config.NewFromFlags()
+	testFlags := flag.NewFlagSet("test", flag.ContinueOnError)
+	conf, err := config.NewFromFlags(testFlags)
 	if err != nil {
 		panic(err)
 	}

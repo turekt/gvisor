@@ -167,6 +167,8 @@ type Args struct {
 	// Attached indicates that the sandbox lifecycle is attached with the caller.
 	// If the caller exits, the sandbox should exit too.
 	Attached bool
+
+	SinkFiles []*os.File
 }
 
 // New creates the sandbox process. The caller must call Destroy() on the
@@ -189,6 +191,17 @@ func New(conf *config.Config, args *Args) (*Sandbox, error) {
 		}
 	})
 	defer c.Clean()
+
+	if len(conf.PodInitConfig) > 0 {
+		initConf, err := boot.LoadInitConfig(conf.PodInitConfig)
+		if err != nil {
+			return nil, err
+		}
+		args.SinkFiles, err = initConf.Setup()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Create pipe to synchronize when sandbox process has been booted.
 	clientSyncFile, sandboxSyncFile, err := os.Pipe()
@@ -530,6 +543,11 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		return err
 	}
 	donations.DonateAndClose("spec-fd", specFile)
+
+	if err := donations.OpenAndDonate("pod-init-config-fd", conf.PodInitConfig, os.O_RDONLY); err != nil {
+		return err
+	}
+	donations.DonateAndClose("sink-fds", args.SinkFiles...)
 
 	gPlatform, err := platform.Lookup(conf.Platform)
 	if err != nil {

@@ -18,6 +18,7 @@ go_library(
         "logging.go",
         "pprof.go",
         "proc.go",
+        "sandbox.go",
         "state.go",
         "usage.go",
     ],

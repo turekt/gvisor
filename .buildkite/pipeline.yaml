@@ -260,6 +260,9 @@ steps:
   - <<: *common
     label: ":world_map: Build everything"
     command: "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//..."
+  - <<: *common
+    label: ":world_map: Kythe"
+    command: make kythe-index
 
   # Run basic benchmarks smoke tests (no upload).
   - <<: *common

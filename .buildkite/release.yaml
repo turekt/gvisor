@@ -9,9 +9,6 @@ _templates:
           limit: 10
         - exit_status: "*"
           limit: 2
-    # This is enforced by the environment hooks on the release agents
-    # as well, only the master branch may be built there.
-    if: build.branch == "master" || build.tag != null
 
 steps:
   - <<: *common
@@ -29,6 +26,12 @@ steps:
       - make BAZEL_OPTIONS=--config=aarch64 artifacts/aarch64
       - make release RELEASE_NIGHTLY=$$RELEASE_NIGHTLY
       - cd repo && gsutil cp -r . gs://gvisor/releases/
+  - <<: *common
+    label: ":ship: Kythe"
+    if: build.tag == null # Don't build tags.
+    commands:
+      - make kythe-index
+      - gsutil cp *.kzip gs://gvisor-kythe-xrefs
   - <<: *common
     label: ":ship: Website Deploy"
     commands:

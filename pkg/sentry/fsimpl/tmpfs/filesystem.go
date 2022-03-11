@@ -727,7 +727,7 @@ func (fs *filesystem) StatFSAt(ctx context.Context, rp *vfs.ResolvingPath) (linu
 	if _, err := resolveLocked(ctx, rp); err != nil {
 		return linux.Statfs{}, err
 	}
-	return globalStatfs, nil
+	return fs.statFS(), nil
 }
 
 // SymlinkAt implements vfs.FilesystemImpl.SymlinkAt.

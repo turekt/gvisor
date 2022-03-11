@@ -24,6 +24,7 @@
 //       regularFile.mapsMu
 //         *** "memmap.Mappable locks taken by Translate" below this point
 //         regularFile.dataMu
+//           fs.pagesUsedMu
 //     directory.iterMu
 package tmpfs
 
@@ -87,6 +88,15 @@ type filesystem struct {
 	root *dentry
 
 	maxFilenameLen int
+
+	// maxSizeInPages is the maximum permissible size for the tmpfs in terms of pages.
+	// This field is immutable.
+	maxSizeInPages uint64
+
+	// pagesUsed is the pages used out of the tmpfs size.
+	// pagesUsed is protected by pagesUsedMu.
+	pagesUsedMu sync.Mutex `state:"nosave"`
+	pagesUsed   uint64
 }
 
 // Name implements vfs.FilesystemType.Name.
@@ -120,6 +130,9 @@ type FilesystemOpts struct {
 
 	// MaxFilenameLen is the maximum filename length allowed by the tmpfs.
 	MaxFilenameLen int
+
+	// MaxSizeInPages is the maximum permissible size for the tmpfs in terms of pages.
+	MaxSizeInPages uint64
 }
 
 // GetFilesystem implements vfs.FilesystemType.GetFilesystem.
@@ -188,6 +201,23 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		}
 		rootKGID = kgid
 	}
+	maxSizeStr, ok := mopts["size"]
+	if ok {
+		delete(mopts, "size")
+		maxSizeInBytes, err := strconv.ParseUint(maxSizeStr, 10, 64)
+		if err != nil {
+			ctx.Warningf("tmpfs.FilesystemType.GetFilesystem: invalid size: %q", maxSizeStr)
+			return nil, nil, linuxerr.EINVAL
+		}
+		// Convert size in bytes to Page Size as Linux allocates memory in terms of Page size.
+		maxSizeInPages, ok := hostarch.PageRoundUp(maxSizeInBytes)
+		if !ok {
+			ctx.Warningf("tmpfs.FilesystemType.GetFilesystem: Pages RoundUp Overflow error: %q", ok)
+			return nil, nil, linuxerr.EINVAL
+		}
+		tmpfsOpts.MaxSizeInPages = maxSizeInPages
+	}
+
 	if len(mopts) != 0 {
 		ctx.Warningf("tmpfs.FilesystemType.GetFilesystem: unknown options: %v", mopts)
 		return nil, nil, linuxerr.EINVAL
@@ -213,6 +243,10 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	fs.vfsfs.Init(vfsObj, newFSType, &fs)
 	if tmpfsOptsOk && tmpfsOpts.MaxFilenameLen > 0 {
 		fs.maxFilenameLen = tmpfsOpts.MaxFilenameLen
+	}
+
+	if tmpfsOptsOk && tmpfsOpts.MaxSizeInPages > 0 {
+		fs.maxSizeInPages = tmpfsOpts.MaxSizeInPages
 	}
 
 	var root *dentry
@@ -272,23 +306,36 @@ func (d *dentry) releaseChildrenLocked(ctx context.Context) {
 	}
 }
 
-// immutable
-var globalStatfs = linux.Statfs{
-	Type:         linux.TMPFS_MAGIC,
-	BlockSize:    hostarch.PageSize,
-	FragmentSize: hostarch.PageSize,
-	NameLength:   linux.NAME_MAX,
+func (fs *filesystem) statFS() linux.Statfs {
+	st := linux.Statfs{
+		Type:         linux.TMPFS_MAGIC,
+		BlockSize:    hostarch.PageSize,
+		FragmentSize: hostarch.PageSize,
+		NameLength:   linux.NAME_MAX,
+	}
 
-	// tmpfs currently does not support configurable size limits. In Linux,
-	// such a tmpfs mount will return f_blocks == f_bfree == f_bavail == 0 from
-	// statfs(2). However, many applications treat this as having a size limit
+	// tmpfs supports configurable size limits.
+	// In Linux, if tmpfs is mounted with size option,
+	// we return the block sizes as set by the user.
+	// Assumption: f_bfree == f_bavail.
+	if fs.maxSizeInPages > 0 {
+		// If size is set for tmpfs return set values.
+		st.Blocks = fs.maxSizeInPages
+		st.BlocksFree = fs.maxSizeInPages - fs.pagesUsed
+		st.BlocksAvailable = fs.maxSizeInPages - fs.pagesUsed
+		return st
+	}
+	// In Linux, if tmpfs is mounted with no size option,
+	// such a tmpfs mount will return
+	// f_blocks == f_bfree == f_bavail == 0 from statfs(2).
+	// However, many applications treat this as having a size limit
 	// of 0. To work around this, claim to have a very large but non-zero size,
 	// chosen to ensure that BlockSize * Blocks does not overflow int64 (which
 	// applications may also handle incorrectly).
-	// TODO(b/29637826): allow configuring a tmpfs size and enforce it.
-	Blocks:          math.MaxInt64 / hostarch.PageSize,
-	BlocksFree:      math.MaxInt64 / hostarch.PageSize,
-	BlocksAvailable: math.MaxInt64 / hostarch.PageSize,
+	st.Blocks = math.MaxInt64 / hostarch.PageSize
+	st.BlocksFree = math.MaxInt64 / hostarch.PageSize
+	st.BlocksAvailable = math.MaxInt64 / hostarch.PageSize
+	return st
 }
 
 // dentry implements vfs.DentryImpl.
@@ -844,7 +891,7 @@ func (fd *fileDescription) SetStat(ctx context.Context, opts vfs.SetStatOptions)
 
 // StatFS implements vfs.FileDescriptionImpl.StatFS.
 func (fd *fileDescription) StatFS(ctx context.Context) (linux.Statfs, error) {
-	return globalStatfs, nil
+	return fd.filesystem().statFS(), nil
 }
 
 // ListXattr implements vfs.FileDescriptionImpl.ListXattr.
@@ -884,5 +931,41 @@ func (fd *fileDescription) RemoveXattr(ctx context.Context, name string) error {
 // Sync implements vfs.FileDescriptionImpl.Sync. It does nothing because all
 // filesystem state is in-memory.
 func (*fileDescription) Sync(context.Context) error {
+	return nil
+}
+
+// updatePagesUsed updates the pagesUsed in filesystem struct
+// if tmpfs is mounted with size option.
+// Assumption: for all the int conversions overflow never occurs
+func (fs *filesystem) updatePagesUsed(oldFileSize, newFileSize uint64) error {
+	oldFileSizePages, ok := hostarch.PageRoundUp(oldFileSize)
+	if !ok {
+		return linuxerr.EINVAL
+	}
+	newFileSizePages, ok := hostarch.PageRoundUp(newFileSize)
+	if !ok {
+		return linuxerr.EINVAL
+	}
+
+	pagesDelta := int64(newFileSizePages) - int64(oldFileSizePages)
+	if pagesDelta == 0 {
+		// No update required.
+		return nil
+	}
+	// Need to acquire fs.pagesUsedMu for fs.pagesUsed.
+	fs.pagesUsedMu.Lock()
+	defer fs.pagesUsedMu.Unlock()
+	pagesFree := fs.maxSizeInPages - fs.pagesUsed
+
+	if int64(pagesFree) < pagesDelta {
+		return linuxerr.ENOSPC
+	}
+
+	newPagesReqd := int64(fs.pagesUsed) + pagesDelta
+	if newPagesReqd < 0 {
+		panic("Deallocating more pages than allocated.")
+	}
+
+	fs.pagesUsed = uint64(newPagesReqd)
 	return nil
 }

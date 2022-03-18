@@ -383,9 +383,9 @@ TEST_P(UdpSocketTest, ConnectWriteToInvalidPort) {
               SyscallSucceedsWithValue(sizeof(buf)));
 
   // Poll to make sure we get the ICMP error back.
-  constexpr int kTimeout = 1000;
   struct pollfd pfd = {sock_.get(), POLLERR, 0};
-  ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, kTimeout), SyscallSucceedsWithValue(1));
+  ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, /*timeout=*/1000),
+              SyscallSucceedsWithValue(1));
 
   // Now verify that we got an ICMP error back of ECONNREFUSED.
   int err;
@@ -1053,6 +1053,11 @@ TEST_P(UdpSocketTest, ReceiveBeforeConnect) {
   ASSERT_THAT(sendto(sock_.get(), buf, sizeof(buf), 0, bind_addr_, addrlen_),
               SyscallSucceedsWithValue(sizeof(buf)));
 
+  // Poll to make sure the data has arrived.
+  struct pollfd pfd = {bind_.get(), POLLIN, 0};
+  ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, /*timeout=*/1000),
+              SyscallSucceedsWithValue(1));
+
   // Connect to loopback:bind_addr_port+1.
   struct sockaddr_storage addr_storage = InetLoopbackAddr();
   struct sockaddr* addr = AsSockAddr(&addr_storage);
@@ -1145,11 +1150,11 @@ TEST_P(UdpSocketTest, ReadShutdownNonblockPendingData) {
   ASSERT_THAT(opts = fcntl(bind_.get(), F_GETFL), SyscallSucceeds());
   ASSERT_NE(opts & O_NONBLOCK, 0);
 
-  EXPECT_THAT(shutdown(bind_.get(), SHUT_RD), SyscallSucceeds());
-
   struct pollfd pfd = {bind_.get(), POLLIN, 0};
   ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, /*timeout=*/1000),
               SyscallSucceedsWithValue(1));
+
+  EXPECT_THAT(shutdown(bind_.get(), SHUT_RD), SyscallSucceeds());
 
   // We should get the data even though read has been shutdown.
   EXPECT_THAT(RecvTimeout(bind_.get(), received, 2 /*buf_size*/, 1 /*timeout*/),

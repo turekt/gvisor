@@ -20,7 +20,7 @@ import (
 	"sort"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/sleep"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
@@ -106,8 +106,7 @@ type sender struct {
 
 	writeNext   *segment
 	writeList   segmentList
-	resendTimer timer       `state:"nosave"`
-	resendWaker sleep.Waker `state:"nosave"`
+	resendTimer timer `state:"nosave"`
 
 	// rtt.TCPRTTState.SRTT and rtt.TCPRTTState.RTTVar are the "smoothed
 	// round-trip time", and "round-trip time variation", as defined in
@@ -138,12 +137,10 @@ type sender struct {
 
 	// reorderTimer is the timer used to retransmit the segments after RACK
 	// detects them as lost.
-	reorderTimer timer       `state:"nosave"`
-	reorderWaker sleep.Waker `state:"nosave"`
+	reorderTimer timer `state:"nosave"`
 
-	// probeTimer and probeWaker are used to schedule PTO for RACK TLP algorithm.
-	probeTimer timer       `state:"nosave"`
-	probeWaker sleep.Waker `state:"nosave"`
+	// probeTimer is used to schedule PTO for RACK TLP algorithm.
+	probeTimer timer `state:"nosave"`
 
 	// spuriousRecovery indicates whether the sender entered recovery
 	// spuriously as described in RFC3522 Section 3.2.
@@ -207,9 +204,9 @@ func newSender(ep *endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, mss uint
 		s.SndWndScale = uint8(sndWndScale)
 	}
 
-	s.resendTimer.init(s.ep.stack.Clock(), &s.resendWaker)
-	s.reorderTimer.init(s.ep.stack.Clock(), &s.reorderWaker)
-	s.probeTimer.init(s.ep.stack.Clock(), &s.probeWaker)
+	s.resendTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.retransmitTimerExpired))
+	s.reorderTimer.init(s.ep.stack.Clock(), s.rc.reorderTimerExpired)
+	s.probeTimer.init(s.ep.stack.Clock(), s.probeTimerExpired)
 
 	s.ep.AssertLockHeld(ep)
 	s.updateMaxPayloadSize(int(ep.route.MTU()), 0)
@@ -432,11 +429,19 @@ func (s *sender) resendSegment() {
 // Returns true if the connection is still usable, or false if the connection
 // is deemed lost.
 // +checklocks:s.ep.mu
-func (s *sender) retransmitTimerExpired() bool {
+func (s *sender) retransmitTimerExpired() tcpip.Error {
+	if (s.resendTimer == timer{}) {
+		// This is possible if the timer had already fired but couldn't
+		// acquire the lock while an endpoint was being cleaned up. In
+		// such a case we could end up here when the lock is released
+		// and the timer has been cleaned up.
+		return nil
+	}
+
 	// Check if the timer actually expired or if it's a spurious wake due
 	// to a previously orphaned runtime timer.
 	if !s.resendTimer.checkExpiration() {
-		return true
+		return nil
 	}
 
 	// Initialize the variables used to detect spurious recovery after
@@ -450,7 +455,7 @@ func (s *sender) retransmitTimerExpired() bool {
 	// when writeList is empty. Remove this once we have a proper fix for this
 	// issue.
 	if s.writeList.Front() == nil {
-		return true
+		return nil
 	}
 
 	s.ep.stack.Stats().TCP.Timeouts.Increment()
@@ -485,7 +490,8 @@ func (s *sender) retransmitTimerExpired() bool {
 	// window probes were acknowledged.
 	// net/ipv4/tcp_timer.c::tcp_probe_timer()
 	if remaining <= 0 || s.unackZeroWindowProbes >= s.maxRetries {
-		return false
+		s.ep.stack.Stats().TCP.EstablishedTimedout.Increment()
+		return &tcpip.ErrTimeout{}
 	}
 
 	// Set new timeout. The timer will be restarted by the call to sendData
@@ -551,24 +557,26 @@ func (s *sender) retransmitTimerExpired() bool {
 	// zero receive window after retransmission interval and we have data to
 	// send.
 	if s.zeroWindowProbing {
+		log.Infof("sending zero window probe")
 		s.sendZeroWindowProbe()
 		// RFC 1122 4.2.2.17: A TCP MAY keep its offered receive window closed
 		// indefinitely.  As long as the receiving TCP continues to send
 		// acknowledgments in response to the probe segments, the sending TCP
 		// MUST allow the connection to stay open.
-		return true
+		return nil
 	}
 
 	seg := s.writeNext
 	// RFC 1122 4.2.3.5: Close the connection when the number of
 	// retransmissions for this segment is beyond a limit.
 	if seg != nil && seg.xmitCount > s.maxRetries {
-		return false
+		s.ep.stack.Stats().TCP.EstablishedTimedout.Increment()
+		return &tcpip.ErrTimeout{}
 	}
 
 	s.sendData()
 
-	return true
+	return nil
 }
 
 // pCount returns the number of packets in the segment. Due to GSO, a segment
@@ -904,6 +912,7 @@ func (s *sender) enableZeroWindowProbing() {
 }
 
 func (s *sender) disableZeroWindowProbing() {
+	log.Infof("disabling zero window probing")
 	s.zeroWindowProbing = false
 	s.unackZeroWindowProbes = 0
 	s.firstRetransmittedSegXmitTime = tcpip.MonotonicTime{}
@@ -921,6 +930,7 @@ func (s *sender) postXmit(dataSent bool, shouldScheduleProbe bool) {
 	// data to be sent out, start zero window probing to query the
 	// the remote for it's receive window size.
 	if s.writeNext != nil && s.SndWnd == 0 {
+		log.Infof("enabling zero window probing for ID: %s", s.ep.ID)
 		s.enableZeroWindowProbing()
 	}
 

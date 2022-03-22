@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/refsvfs2"
@@ -179,15 +180,8 @@ func TestConnectICMPError(t *testing.T) {
 	checker.IPv4(t, syn, checker.TCP(checker.TCPFlags(header.TCPFlagSyn)))
 
 	wep := ep.(interface {
-		StopWork()
-		ResumeWork()
 		LastErrorLocked() tcpip.Error
 	})
-
-	// Stop the protocol loop, ensure that the ICMP error is processed and
-	// the last ICMP error is read before the loop is resumed. This sanity
-	// tests the handshake completion logic on ICMP errors.
-	wep.StopWork()
 
 	c.SendICMPPacket(header.ICMPv4DstUnreachable, header.ICMPv4HostUnreachable, nil, syn, e2e.DefaultMTU)
 
@@ -200,8 +194,6 @@ func TestConnectICMPError(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-
-	wep.ResumeWork()
 
 	<-notifyCh
 
@@ -373,9 +365,8 @@ func TestTCPResetsSentIncrement(t *testing.T) {
 	}
 }
 
-// TestTCPResetsSentNoICMP confirms that we don't get an ICMP
-// DstUnreachable packet when we try send a packet which is not part
-// of an active session.
+// TestTCPResetsSentNoICMP confirms that we don't get an ICMP DstUnreachable
+// packet when we try send a packet which is not part of an active session.
 func TestTCPResetsSentNoICMP(t *testing.T) {
 	c := context.New(t, e2e.DefaultMTU)
 	defer c.Cleanup()
@@ -494,7 +485,6 @@ func TestTCPResetSentForACKWhenNotUsingSynCookies(t *testing.T) {
 	}
 
 	c.SendPacket(nil, finHeaders)
-
 	// Get the ACK to the FIN we just sent.
 	c.GetPacket()
 
@@ -1465,7 +1455,9 @@ func TestListenCloseWhileConnect(t *testing.T) {
 	executeHandshake(t, c, context.TestPort, false /* synCookiesInUse */)
 	// Wait for the new endpoint created because of handshake to be delivered
 	// to the listening endpoint's accept queue.
+	log.Infof("about to wait for notification")
 	<-notifyCh
+	log.Infof("got notification")
 
 	// Close the listening endpoint.
 	c.EP.Close()

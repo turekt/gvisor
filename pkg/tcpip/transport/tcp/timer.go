@@ -18,7 +18,6 @@ import (
 	"math"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/sleep"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
@@ -69,17 +68,15 @@ type timer struct {
 	timer tcpip.Timer
 }
 
-// init initializes the timer. Once it expires, it the given waker will be
-// asserted.
-func (t *timer) init(clock tcpip.Clock, w *sleep.Waker) {
+// init initializes the timer. Once it expires the function callback
+// passed will be called.
+func (t *timer) init(clock tcpip.Clock, f func()) {
 	t.state = timerStateDisabled
 	t.clock = clock
 
-	// Initialize a clock timer that will assert the waker, then
+	// Initialize a clock timer that will call the callback func, then
 	// immediately stop it.
-	t.timer = t.clock.AfterFunc(math.MaxInt64, func() {
-		w.Assert()
-	})
+	t.timer = t.clock.AfterFunc(math.MaxInt64, f)
 	t.timer.Stop()
 }
 
@@ -94,9 +91,9 @@ func (t *timer) cleanup() {
 }
 
 // checkExpiration checks if the given timer has actually expired, it should be
-// called whenever a sleeper wakes up due to the waker being asserted, and is
-// used to check if it's a supurious wake (due to a previously orphaned timer)
-// or a legitimate one.
+// called whenever the callback function is called, and is used to check if it's
+// a supurious timer expiration (due to a previously orphaned timer) or a
+// legitimate one.
 func (t *timer) checkExpiration() bool {
 	// Transition to fully disabled state if we're just consuming an
 	// orphaned timer.

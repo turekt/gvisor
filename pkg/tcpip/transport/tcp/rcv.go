@@ -303,11 +303,13 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 		switch r.ep.EndpointState() {
 		case StateFinWait1:
 			r.ep.setEndpointState(StateFinWait2)
-			// Notify protocol goroutine that we have received an
-			// ACK to our FIN so that it can start the FIN_WAIT2
-			// timer to abort connection if the other side does
-			// not close within 2MSL.
-			r.ep.notifyProtocolGoroutine(notifyClose)
+			if r.ep.closed {
+				e := r.ep
+				// The socket has been closed and we are in FIN_WAIT2 so start
+				// the FIN-WAIT-2 timer.
+				e.finWait2Timer = e.stack.Clock().AfterFunc(e.tcpLingerTimeout, e.finWait2TimerExpired)
+			}
+
 		case StateClosing:
 			r.ep.setEndpointState(StateTimeWait)
 		case StateLastAck:

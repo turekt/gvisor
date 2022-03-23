@@ -84,8 +84,9 @@ type fakeNetworkEndpoint struct {
 	mu struct {
 		sync.RWMutex
 
-		enabled    bool
-		forwarding bool
+		enabled             bool
+		forwarding          bool
+		multicastForwarding bool
 	}
 
 	nic        stack.NetworkInterface
@@ -310,6 +311,22 @@ func (f *fakeNetworkEndpoint) SetForwarding(v bool) bool {
 	defer f.mu.Unlock()
 	prev := f.mu.forwarding
 	f.mu.forwarding = v
+	return prev
+}
+
+// MulticastForwarding implements stack.MulticastForwardingNetworkEndpoint.
+func (f *fakeNetworkEndpoint) MulticastForwarding() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.mu.multicastForwarding
+}
+
+// SetMulticastForwarding implements stack.MulticastForwardingNetworkEndpoint.
+func (f *fakeNetworkEndpoint) SetMulticastForwarding(v bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	prev := f.mu.multicastForwarding
+	f.mu.multicastForwarding = v
 	return prev
 }
 
@@ -4646,6 +4663,86 @@ func TestFindRouteWithForwarding(t *testing.T) {
 }
 
 func TestNICForwarding(t *testing.T) {
+	type forwardingType string
+
+	const (
+		unicast   forwardingType = "Unicast"
+		multicast forwardingType = "Multicast"
+	)
+
+	type validationContext struct {
+		s              *stack.Stack
+		nicID          tcpip.NICID
+		protocol       tcpip.NetworkProtocolNumber
+		forwardingType forwardingType
+	}
+
+	// mustSetNicForwarding validates that that the forwarding value is set and
+	// that the previous value matches the expected value.
+	mustSetNicForwarding := func(ctx validationContext, forward bool, want bool) {
+		switch ctx.forwardingType {
+		case unicast:
+			if prevValue, err := ctx.s.SetNICForwarding(ctx.nicID, ctx.protocol, forward); err != nil {
+				t.Fatalf("s.SetNICForwarding(%d, %d, %t): %s", ctx.nicID, ctx.protocol, forward, err)
+			} else if prevValue != want {
+				t.Errorf("got s.SetNICForwarding(%d, %d, %t) = %t, want = %t", ctx.nicID, ctx.protocol, forward, prevValue, want)
+			}
+		case multicast:
+			if prevValue, err := ctx.s.SetNICMulticastForwarding(ctx.nicID, ctx.protocol, forward); err != nil {
+				t.Fatalf("s.SetNICMulticastForwarding(%d, %d, %t): %s", ctx.nicID, ctx.protocol, forward, err)
+			} else if prevValue != want {
+				t.Errorf("got s.SetNICMulticastForwarding(%d, %d, %t) = %t, want = %t", ctx.nicID, ctx.protocol, forward, prevValue, want)
+			}
+		default:
+			panic(fmt.Sprintf("unexpected forwardingType = %s", ctx.forwardingType))
+		}
+	}
+
+	// mustHaveNicForwarding validates that the forwarding value matches the
+	// expected value.
+	mustHaveNicForwarding := func(ctx validationContext, want bool) {
+		switch ctx.forwardingType {
+		case unicast:
+			if value, err := ctx.s.NICForwarding(ctx.nicID, ctx.protocol); err != nil {
+				t.Fatalf("s.NICForwarding(%d, %d): %s", ctx.nicID, ctx.protocol, err)
+			} else if value != want {
+				t.Errorf("got s.NICForwarding(%d, %d) = %t, want = %t", ctx.nicID, ctx.protocol, value, want)
+			}
+
+			// Verify that the NICInfo also contains the expected value.
+			allNICInfo := ctx.s.NICInfo()
+			if info, ok := allNICInfo[ctx.nicID]; !ok {
+				t.Fatalf("entry for %d missing from allNICInfo = %+v", ctx.nicID, allNICInfo)
+			} else {
+				if forward, ok := info.Forwarding[ctx.protocol]; !ok {
+					t.Fatalf("entry for %d missing from info.Forwarding = %+v", ctx.protocol, info.Forwarding)
+				} else if forward != want {
+					t.Errorf("got info.Forwarding[%d] = %t, want = %t", ctx.protocol, forward, want)
+				}
+			}
+		case multicast:
+			if value, err := ctx.s.NICMulticastForwarding(ctx.nicID, ctx.protocol); err != nil {
+				t.Fatalf("s.NICMulticastForwarding(%d, %d): %s", ctx.nicID, ctx.protocol, err)
+			} else if value != want {
+				t.Errorf("got s.NICMulticastForwarding(%d, %d) = %t, want = %t", ctx.nicID, ctx.protocol, value, want)
+			}
+
+			// Verify that the NICInfo also contains the expected value.
+			allNICInfo := ctx.s.NICInfo()
+			if info, ok := allNICInfo[ctx.nicID]; !ok {
+				t.Fatalf("entry for %d missing from allNICInfo = %+v", ctx.nicID, allNICInfo)
+			} else {
+				if forward, ok := info.MulticastForwarding[ctx.protocol]; !ok {
+					t.Fatalf("entry for %d missing from info.MulticastForwarding = %+v", ctx.protocol, info.MulticastForwarding)
+				} else if forward != want {
+					t.Errorf("got info.MulticastForwarding[%d] = %t, want = %t", ctx.protocol, forward, want)
+				}
+			}
+		default:
+			panic(fmt.Sprintf("unexpected forwardingType = %s", ctx.forwardingType))
+		}
+	}
+
 	const nicID = 1
 
 	tests := []struct {
@@ -4671,51 +4768,35 @@ func TestNICForwarding(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			s := stack.New(stack.Options{
-				NetworkProtocols: []stack.NetworkProtocolFactory{test.factory},
+		for _, forwardingType := range [...]forwardingType{unicast, multicast} {
+			t.Run(fmt.Sprintf("%s %s", test.name, forwardingType), func(t *testing.T) {
+				s := stack.New(stack.Options{
+					NetworkProtocols: []stack.NetworkProtocolFactory{test.factory},
+				})
+				if err := s.CreateNIC(nicID, channel.New(0, defaultMTU, "")); err != nil {
+					t.Fatalf("CreateNIC(%d, _): %s", nicID, err)
+				}
+
+				validationCtx := validationContext{s, nicID, test.netProto, forwardingType}
+
+				// Forwarding should initially be disabled.
+				mustHaveNicForwarding(validationCtx, false /* want */)
+
+				// Setting forwarding to be enabled should return the previous
+				// configuration of false. Enabling it a second time should be a no-op.
+				for _, wantPrevForwarding := range [...]bool{false, true} {
+					mustSetNicForwarding(validationCtx, true /* forward */, wantPrevForwarding)
+					mustHaveNicForwarding(validationCtx, true /* want */)
+				}
+
+				// Setting forwarding to be disabled should return the previous
+				// configuration of true. Disabling it a second time should be a no-op.
+				for _, wantPrevForwarding := range [...]bool{true, false} {
+					mustSetNicForwarding(validationCtx, false /* forward */, wantPrevForwarding)
+					mustHaveNicForwarding(validationCtx, false /* want */)
+				}
 			})
-			if err := s.CreateNIC(nicID, channel.New(0, defaultMTU, "")); err != nil {
-				t.Fatalf("CreateNIC(%d, _): %s", nicID, err)
-			}
-
-			// Forwarding should initially be disabled.
-			if forwarding, err := s.NICForwarding(nicID, test.netProto); err != nil {
-				t.Fatalf("s.NICForwarding(%d, %d): %s", nicID, test.netProto, err)
-			} else if forwarding {
-				t.Errorf("got s.NICForwarding(%d, %d) = true, want = false", nicID, test.netProto)
-			}
-
-			// Setting forwarding to be enabled should return the previous
-			// configuration of false. Enabling it a second time should be a no-op.
-			for _, wantPrevForwarding := range [...]bool{false, true} {
-				if prevForwarding, err := s.SetNICForwarding(nicID, test.netProto, true); err != nil {
-					t.Fatalf("s.SetNICForwarding(%d, %d, true): %s", nicID, test.netProto, err)
-				} else if prevForwarding != wantPrevForwarding {
-					t.Errorf("got s.SetNICForwarding(%d, %d, true) = %t, want = %t", nicID, test.netProto, prevForwarding, wantPrevForwarding)
-				}
-				if forwarding, err := s.NICForwarding(nicID, test.netProto); err != nil {
-					t.Fatalf("s.NICForwarding(%d, %d): %s", nicID, test.netProto, err)
-				} else if !forwarding {
-					t.Errorf("got s.NICForwarding(%d, %d) = false, want = true", nicID, test.netProto)
-				}
-			}
-
-			// Setting forwarding to be disabled should return the previous
-			// configuration of true. Disabling it a second time should be a no-op.
-			for _, wantPrevForwarding := range [...]bool{true, false} {
-				if prevForwarding, err := s.SetNICForwarding(nicID, test.netProto, false); err != nil {
-					t.Fatalf("s.SetNICForwarding(%d, %d, false): %s", nicID, test.netProto, err)
-				} else if prevForwarding != wantPrevForwarding {
-					t.Errorf("got s.SetNICForwarding(%d, %d, false) = %t, want = %t", nicID, test.netProto, prevForwarding, wantPrevForwarding)
-				}
-				if forwarding, err := s.NICForwarding(nicID, test.netProto); err != nil {
-					t.Fatalf("s.NICForwarding(%d, %d): %s", nicID, test.netProto, err)
-				} else if forwarding {
-					t.Errorf("got s.NICForwarding(%d, %d) = true, want = false", nicID, test.netProto)
-				}
-			}
-		})
+		}
 	}
 }
 

@@ -23,7 +23,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sleep"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -340,7 +339,7 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 // sendAck sends an ACK segment.
 // +checklocks:s.ep.mu
 func (s *sender) sendAck() {
-	s.sendSegmentFromView(buffer.VectorisedView{}, header.TCPFlagAck, s.SndNxt)
+	s.sendFlags(header.TCPFlagAck, s.SndNxt)
 }
 
 // updateRTO updates the retransmit timeout when a new roud-trip time is
@@ -887,7 +886,7 @@ func (s *sender) sendZeroWindowProbe() {
 	s.unackZeroWindowProbes++
 	// Send a zero window probe with sequence number pointing to
 	// the last acknowledged byte.
-	s.ep.sendRaw(buffer.VectorisedView{}, header.TCPFlagAck, s.SndUna-1, ack, win)
+	s.ep.sendFlags(header.TCPFlagAck, s.SndUna-1, ack, win)
 	// Rearm the timer to continue probing.
 	s.resendTimer.enable(s.RTO)
 }
@@ -1641,6 +1640,7 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 
 // sendSegment sends the specified segment.
 // +checklocks:s.ep.mu
+// +checklocksalias:s.ep.rcv.ep.mu=s.ep.mu
 func (s *sender) sendSegment(seg *segment) tcpip.Error {
 	if seg.xmitCount > 0 {
 		s.ep.stack.Stats().TCP.Retransmits.Increment()
@@ -1652,7 +1652,33 @@ func (s *sender) sendSegment(seg *segment) tcpip.Error {
 	seg.xmitTime = s.ep.stack.Clock().NowMonotonic()
 	seg.xmitCount++
 	seg.lost = false
-	err := s.sendSegmentFromView(seg.data, seg.flags, seg.sequenceNumber)
+
+	s.LastSendTime = s.ep.stack.Clock().NowMonotonic()
+	if seg.sequenceNumber == s.RTTMeasureSeqNum {
+		s.RTTMeasureTime = s.LastSendTime
+	}
+
+	rcvNxt, rcvWnd := s.ep.rcv.getSendParams()
+
+	// Remember the max sent ack.
+	s.MaxSentAck = rcvNxt
+
+	var sackBlocks []header.SACKBlock
+	if s.ep.EndpointState() == StateEstablished && s.ep.rcv.pendingRcvdSegments.Len() > 0 && (seg.flags&header.TCPFlagAck != 0) {
+		sackBlocks = s.ep.sack.Blocks[:s.ep.sack.NumBlocks]
+	}
+	options := s.ep.makeOptions(sackBlocks)
+	err := s.ep.sendTCP(s.ep.route, tcpFields{
+		id:     s.ep.TransportEndpointInfo.ID,
+		ttl:    calculateTTL(s.ep.route, s.ep.ipv4TTL, s.ep.ipv6HopLimit),
+		tos:    s.ep.sendTOS,
+		flags:  seg.flags,
+		seq:    seg.sequenceNumber,
+		ack:    rcvNxt,
+		rcvWnd: rcvWnd,
+		opts:   options,
+	}, seg.data, s.ep.gso)
+	putOptions(options)
 
 	// Every time a packet containing data is sent (including a
 	// retransmission), if SACK is enabled and we are retransmitting data
@@ -1671,11 +1697,10 @@ func (s *sender) sendSegment(seg *segment) tcpip.Error {
 	return err
 }
 
-// sendSegmentFromView sends a new segment containing the given payload, flags
-// and sequence number.
+// sendFlags sends a new segment containing the given flags and sequence number.
 // +checklocks:s.ep.mu
 // +checklocksalias:s.ep.rcv.ep.mu=s.ep.mu
-func (s *sender) sendSegmentFromView(data buffer.VectorisedView, flags header.TCPFlags, seq seqnum.Value) tcpip.Error {
+func (s *sender) sendFlags(flags header.TCPFlags, seq seqnum.Value) tcpip.Error {
 	s.LastSendTime = s.ep.stack.Clock().NowMonotonic()
 	if seq == s.RTTMeasureSeqNum {
 		s.RTTMeasureTime = s.LastSendTime
@@ -1685,8 +1710,7 @@ func (s *sender) sendSegmentFromView(data buffer.VectorisedView, flags header.TC
 
 	// Remember the max sent ack.
 	s.MaxSentAck = rcvNxt
-
-	return s.ep.sendRaw(data, flags, seq, rcvNxt, rcvWnd)
+	return s.ep.sendFlags(flags, seq, rcvNxt, rcvWnd)
 }
 
 // maybeSendOutOfWindowAck sends an ACK if we are not being rate limited

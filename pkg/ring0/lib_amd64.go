@@ -84,6 +84,11 @@ var (
 func Init(fs cpuid.FeatureSet) {
 	// Initialize all sizes.
 	VirtualAddressBits = uintptr(fs.VirtualAddressBits())
+	// TODO(issues/7349): introduce support for 5-level paging.
+	// Four-level page tables allows to address up to 48-bit virtual addresses.
+	if VirtualAddressBits > 48 {
+		VirtualAddressBits = 48
+	}
 	PhysicalAddressBits = uintptr(fs.PhysicalAddressBits())
 	UserspaceSize = uintptr(1) << (VirtualAddressBits - 1)
 	MaximumUserAddress = (UserspaceSize - 1) & ^uintptr(hostarch.PageSize-1)
